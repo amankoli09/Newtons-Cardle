@@ -1,19 +1,297 @@
-<!DOCTYPE html>
-  <html lang="">
-    <head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Matter JS BoilerPlate</title>
-      <style> body {padding: 0; margin: 0;} </style>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.14.2/matter.min.js"></script>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.0.0/p5.min.js"></script>
-      <script src="p5.play.js"></script>
-      <script src="Bob.js"></script>
-      <script src="suspender.js"></script>
-      <script src="Ground.js"></script>
-      <script src="sketch.js"></script>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Matter + p5 Interactive Demo</title>
 
-    </head>
-    <body>
-    </body>
-  </html>
+  <!-- CDN libs -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.14.2/matter.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.0.0/p5.min.js"></script>
+
+  <style>
+    html,body { height:100%; margin:0; font-family: system-ui, sans-serif; background:#111; color:#eee }
+    #ui { position:fixed; right:12px; top:12px; width:260px; background:rgba(0,0,0,0.45); padding:12px; border-radius:8px; box-shadow:0 6px 20px rgba(0,0,0,0.6); }
+    label { display:block; font-size:13px; margin-top:8px; color:#ddd }
+    input[type=range] { width:100% }
+    button { margin-top:8px; width:100%; padding:8px; border-radius:6px; border:0; cursor:pointer }
+    .small { font-size:12px; color:#bbb }
+    #canvas-holder { position: absolute; left:0; top:0; right:0; bottom:0 }
+    .hint { position:fixed; left:12px; bottom:12px; background:rgba(255,255,255,0.06); padding:8px 12px; border-radius:8px; color:#ddd }
+  </style>
+</head>
+<body>
+  <div id="canvas-holder"></div>
+
+  <div id="ui">
+    <strong>Interactive Physics</strong>
+    <div class="small">Matter.js + p5 — click to spawn, drag to move</div>
+
+    <label>Spawn shape</label>
+    <select id="shapeSelect">
+      <option value="circle">Circle</option>
+      <option value="rectangle">Rectangle</option>
+      <option value="polygon">Polygon (5)</option>
+    </select>
+
+    <label>Size</label>
+    <input id="sizeRange" type="range" min="10" max="80" value="32">
+
+    <label>Gravity</label>
+    <input id="gravRange" type="range" min="-1" max="2" step="0.01" value="1">
+
+    <label>Fill Color</label>
+    <input id="colorPicker" type="color" value="#FF7A7A" style="width:100%">
+
+    <button id="spawnBtn">Spawn at center</button>
+    <button id="clearBtn" style="background:#d9534f; color:white">Clear all</button>
+    <button id="resetBtn">Reset world</button>
+    <button id="pauseBtn">Pause</button>
+    <label class="small">Keyboard: Space = spawn, R = reset, P = pause</label>
+  </div>
+
+  <div class="hint">Drag shapes with mouse — toggle gravity to -1 for floaty mode</div>
+
+  <script>
+    // ===== Matter.js essentials =====
+    const Engine = Matter.Engine;
+    const Render = Matter.Render; // not used for visual, p5 draws
+    const World = Matter.World;
+    const Bodies = Matter.Bodies;
+    const Body = Matter.Body;
+    const Runner = Matter.Runner;
+    const Mouse = Matter.Mouse;
+    const MouseConstraint = Matter.MouseConstraint;
+
+    let engine, world, runner;
+    let mConstraint; // mouse constraint
+    let bodies = [];
+    let canvas;
+    let isPaused = false;
+
+    // p5.js sketch
+    const sketch = (s) => {
+      s.setup = () => {
+        const holder = document.getElementById('canvas-holder');
+        canvas = s.createCanvas(window.innerWidth, window.innerHeight);
+        canvas.parent(holder);
+
+        // Engine
+        engine = Engine.create();
+        world = engine.world;
+        world.gravity.y = 1; // default
+
+        // Runner
+        runner = Runner.create();
+        Runner.run(runner, engine);
+
+        // Add ground and walls
+        createBoundaries();
+
+        // Mouse constraint for dragging bodies
+        const mouse = Mouse.create(s.canvas);
+        const options = { mouse: mouse, constraint: { stiffness: 0.2, render: { visible: false } } };
+        mConstraint = MouseConstraint.create(engine, options);
+        World.add(world, mConstraint);
+
+        // UI hooks
+        setupUI();
+      };
+
+      s.draw = () => {
+        s.background(18);
+
+        if (!isPaused) {
+          // Engine update is already running via runner, but keep visuals in sync
+        }
+
+        // Draw all bodies
+        s.noStroke();
+        for (let i = 0; i < world.bodies.length; i++) {
+          const b = world.bodies[i];
+          drawBody(s, b);
+        }
+
+        // Draw mouse constraint if dragging
+        if (mConstraint && mConstraint.body) {
+          s.stroke(255, 200);
+          s.line(mConstraint.mouse.position.x, mConstraint.mouse.position.y, mConstraint.constraint.bodyB.position.x, mConstraint.constraint.bodyB.position.y);
+          s.noStroke();
+        }
+
+        // HUD
+        s.fill(255);
+        s.textSize(13);
+        s.text(`Bodies: ${world.bodies.length}`, 16, 20);
+        s.text(`Gravity Y: ${world.gravity.y.toFixed(2)}`, 16, 40);
+      };
+
+      s.windowResized = () => {
+        s.resizeCanvas(window.innerWidth, window.innerHeight);
+        // update boundaries to new size
+        clearBoundaries();
+        createBoundaries();
+      };
+
+      s.mousePressed = () => {
+        // spawn shape at mouse
+        if (s.mouseX >= 0 && s.mouseY >= 0 && s.mouseX <= s.width && s.mouseY <= s.height) {
+          spawnAt(s.mouseX, s.mouseY);
+        }
+      };
+    };
+
+    new p5(sketch);
+
+    // ===== helper functions =====
+    function setupUI() {
+      const gravRange = document.getElementById('gravRange');
+      const sizeRange = document.getElementById('sizeRange');
+      const colorPicker = document.getElementById('colorPicker');
+      const spawnBtn = document.getElementById('spawnBtn');
+      const clearBtn = document.getElementById('clearBtn');
+      const resetBtn = document.getElementById('resetBtn');
+      const pauseBtn = document.getElementById('pauseBtn');
+
+      gravRange.addEventListener('input', () => {
+        world.gravity.y = parseFloat(gravRange.value);
+      });
+
+      spawnBtn.addEventListener('click', () => {
+        spawnAt(window.innerWidth / 2, window.innerHeight / 2);
+      });
+
+      clearBtn.addEventListener('click', () => {
+        clearDynamicBodies();
+      });
+
+      resetBtn.addEventListener('click', () => {
+        resetWorld();
+      });
+
+      pauseBtn.addEventListener('click', () => {
+        togglePause();
+      });
+
+      // keyboard shortcuts
+      window.addEventListener('keydown', (e) => {
+        if (e.code === 'Space') {
+          spawnAt(window.innerWidth / 2, 80);
+        } else if (e.key.toLowerCase() === 'r') {
+          resetWorld();
+        } else if (e.key.toLowerCase() === 'p') {
+          togglePause();
+        }
+      });
+    }
+
+    function createBoundaries() {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const thickness = 60;
+
+      // ground
+      const ground = Bodies.rectangle(w/2, h + thickness/2, w + 2*thickness, thickness, { isStatic: true, label: 'boundary' });
+      const ceiling = Bodies.rectangle(w/2, -thickness/2, w + 2*thickness, thickness, { isStatic: true, label: 'boundary' });
+      const left = Bodies.rectangle(-thickness/2, h/2, thickness, h + 2*thickness, { isStatic: true, label: 'boundary' });
+      const right = Bodies.rectangle(w + thickness/2, h/2, thickness, h + 2*thickness, { isStatic: true, label: 'boundary' });
+
+      World.add(world, [ground, ceiling, left, right]);
+    }
+
+    function clearBoundaries() {
+      // remove static boundaries
+      const toRemove = world.bodies.filter(b => b.isStatic && b.label === 'boundary');
+      for (const b of toRemove) World.remove(world, b);
+    }
+
+    function spawnAt(x, y) {
+      const shape = document.getElementById('shapeSelect').value;
+      const size = parseInt(document.getElementById('sizeRange').value);
+      const color = document.getElementById('colorPicker').value;
+
+      let body;
+      if (shape === 'circle') {
+        body = Bodies.circle(x, y, size/2, { restitution: 0.6, friction: 0.05 });
+      } else if (shape === 'rectangle') {
+        body = Bodies.rectangle(x, y, size*1.4, size, { restitution: 0.3, friction: 0.08 });
+      } else if (shape === 'polygon') {
+        body = Bodies.polygon(x, y, 5, size/2, { restitution: 0.4, friction: 0.07 });
+      }
+
+      // store meta so p5 can draw with color
+      body.render = body.render || {};
+      body.render.fillStyle = color;
+      body.render.strokeStyle = shadeColor(color, -20);
+      body.render.lineWidth = 2;
+
+      World.add(world, body);
+    }
+
+    function drawBody(s, b) {
+      s.push();
+      s.translate(b.position.x, b.position.y);
+      s.rotate(b.angle);
+
+      const fillColor = (b.render && b.render.fillStyle) ? b.render.fillStyle : '#999';
+      const strokeColor = (b.render && b.render.strokeStyle) ? b.render.strokeStyle : '#222';
+      const lw = (b.render && b.render.lineWidth) ? b.render.lineWidth : 1;
+
+      s.stroke(strokeColor);
+      s.strokeWeight(lw);
+      s.fill(fillColor + '66'); // add alpha-ish by appending (works for hex in modern browsers)
+
+      // draw by number of vertices
+      const verts = b.vertices;
+      s.beginShape();
+      for (let i=0; i<verts.length; i++) {
+        s.vertex(verts[i].x - b.position.x, verts[i].y - b.position.y);
+      }
+      s.endShape(s.CLOSE);
+
+      s.pop();
+    }
+
+    function clearDynamicBodies() {
+      const dynamic = world.bodies.filter(b => !b.isStatic);
+      for (const b of dynamic) World.remove(world, b);
+    }
+
+    function resetWorld() {
+      // remove all bodies and add boundaries & demo shapes
+      World.clear(world, false);
+      Engine.clear(engine);
+      createBoundaries();
+    }
+
+    function togglePause() {
+      isPaused = !isPaused;
+      const pauseBtn = document.getElementById('pauseBtn');
+      if (isPaused) {
+        Runner.stop(runner);
+        pauseBtn.textContent = 'Resume';
+      } else {
+        Runner.run(runner, engine);
+        pauseBtn.textContent = 'Pause';
+      }
+    }
+
+    // small color helper
+    function shadeColor(hex, percent) {
+      // hex -> shade by percent (-100..100)
+      const f = parseInt(hex.slice(1),16);
+      const t = percent < 0 ? 0 : 255;
+      const p = Math.abs(percent)/100;
+      const R = Math.round((t - (f>>16)) * p) + (f>>16);
+      const G = Math.round((t - (f>>8 & 0x00FF)) * p) + (f>>8 & 0x00FF);
+      const B = Math.round((t - (f & 0x0000FF)) * p) + (f & 0x0000FF);
+      return `#${(0x1000000 + (R<<16) + (G<<8) + B).toString(16).slice(1)}`;
+    }
+
+    // clean up on page unload
+    window.addEventListener('beforeunload', () => {
+      try { Runner.stop(runner); } catch(e){}
+    });
+  </script>
+</body>
+</html>
